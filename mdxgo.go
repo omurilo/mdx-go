@@ -47,20 +47,7 @@ func Compile(source []byte) (string, error) {
 	topLevel, mdxBody := extractTopLevelStatements(source)
 
 	ext := NewMDXExtension()
-
-	md := goldmark.New(
-		goldmark.WithExtensions(
-			ext,
-			extension.GFM,
-			extension.Footnote,
-		),
-		goldmark.WithParserOptions(
-			parser.WithAutoHeadingID(),
-		),
-		goldmark.WithRendererOptions(
-			renderer.WithNodeRenderers(),
-		),
-	)
+	md := newMarkdown(ext)
 
 	var buf bytes.Buffer
 	if err := md.Convert(mdxBody, &buf); err != nil {
@@ -110,6 +97,47 @@ func Compile(source []byte) (string, error) {
 	}
 
 	return string(result.Code), nil
+}
+
+// newMarkdown builds the goldmark instance used for both whole-document and
+// fragment compilation, wiring in the MDX extension alongside GFM and footnote
+// support so nested content parses identically to top-level content.
+func newMarkdown(ext *MDXExtension) goldmark.Markdown {
+	return goldmark.New(
+		goldmark.WithExtensions(
+			ext,
+			extension.GFM,
+			extension.Footnote,
+		),
+		goldmark.WithParserOptions(
+			parser.WithAutoHeadingID(),
+		),
+		goldmark.WithRendererOptions(
+			renderer.WithNodeRenderers(),
+		),
+	)
+}
+
+// compileFragment renders the inner content of a block-level JSX element to a
+// JSX body string, without the surrounding ESM module wrapper. The body is
+// spliced as children into the enclosing element by the renderer, so code spans
+// and expressions inside the block are processed by the normal renderer rather
+// than emitted verbatim. Any module-level import/export statements found in the
+// fragment are returned so the caller can hoist them to the document scope.
+func compileFragment(source []byte) (body string, topLevel []string, err error) {
+	stmts, mdxBody := extractTopLevelStatements(source)
+
+	ext := NewMDXExtension()
+	ext.Renderer.fragment = true
+	md := newMarkdown(ext)
+
+	var buf bytes.Buffer
+	if err := md.Convert(mdxBody, &buf); err != nil {
+		return "", nil, fmt.Errorf("mdx-go: goldmark render error in JSX block: %w", err)
+	}
+
+	hoisted := ext.Renderer.GetTopLevelStatements()
+	return buf.String(), append(stmts, hoisted...), nil
 }
 
 // extractTopLevelStatements scans the leading region of an MDX source for bare
@@ -203,3 +231,11 @@ func bracketDelta(s string) int {
 
 // Version returns the library version string.
 func Version() string { return "0.1.0" }
+
+func DebugFragmentRaw(src []byte) string {
+	ext := NewMDXExtension()
+	ext.Renderer.fragment = true
+	var buf bytes.Buffer
+	_ = newMarkdown(ext).Convert(src, &buf)
+	return buf.String()
+}

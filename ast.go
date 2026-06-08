@@ -43,9 +43,16 @@ type JSXBlock struct {
 	// prevent *JSXBlock from satisfying ast.Node.
 	Attrs map[string]string
 
-	// RawInner holds inner content captured verbatim when the block contains
-	// non-markdown children that goldmark cannot parse.
+	// RawInner holds the block's inner content captured verbatim in source
+	// order. The renderer recompiles it as a Markdown fragment, so it may hold
+	// Markdown, nested JSX or a mix of both.
 	RawInner []byte
+
+	// complete reports that the whole element, including its closing tag, was
+	// consumed during Open because it fit on a single line (for example
+	// <summary>Title</summary>). Continue uses it to close the block straight
+	// away instead of treating the following lines as inner content.
+	complete bool
 }
 
 // Dump writes a human-readable representation of the node for debugging,

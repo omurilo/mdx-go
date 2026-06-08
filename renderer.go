@@ -18,6 +18,12 @@ import (
 // can be emitted before the component function.
 type jsxRenderer struct {
 	topLevelStatements []string
+
+	// fragment reports that this renderer is producing the inner body of a JSX
+	// block rather than a whole document. When true, renderDocument omits the
+	// surrounding ESM module wrapper so the output can be spliced as children
+	// into an enclosing element.
+	fragment bool
 }
 
 // RegisterFuncs registers a rendering function for each AST node kind. goldmark
@@ -62,6 +68,9 @@ func (r *jsxRenderer) RegisterFuncs(reg renderer.NodeRendererFuncRegisterer) {
 // Compile replaces it after the walk with the statements collected in
 // topLevelStatements.
 func (r *jsxRenderer) renderDocument(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
+	if r.fragment {
+		return ast.WalkContinue, nil
+	}
 	if entering {
 		_, _ = fmt.Fprintln(w, `import React from 'react';`)
 		_, _ = fmt.Fprintln(w, `// __MDX_TOP_LEVEL_PLACEHOLDER__`)
@@ -339,8 +348,9 @@ func (r *jsxRenderer) renderRawHTML(w util.BufWriter, source []byte, node ast.No
 
 // renderJSXBlock emits a JSX component or element. Attributes are written in
 // sorted key order for deterministic output, distinguishing boolean shorthand,
-// brace expressions and string values. Any captured RawInner content is emitted
-// verbatim so the downstream JSX compiler can process it.
+// brace expressions and string values. Any captured RawInner content is
+// recompiled as a Markdown fragment and spliced in as children so that nested
+// code spans and expressions are processed safely rather than emitted verbatim.
 func (r *jsxRenderer) renderJSXBlock(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	n := node.(*JSXBlock)
 	if entering {
@@ -367,7 +377,12 @@ func (r *jsxRenderer) renderJSXBlock(w util.BufWriter, source []byte, node ast.N
 		_, _ = fmt.Fprint(w, ">\n")
 
 		if len(n.RawInner) > 0 {
-			_, _ = w.Write(n.RawInner)
+			body, topLevel, err := compileFragment(n.RawInner)
+			if err != nil {
+				return ast.WalkStop, err
+			}
+			r.topLevelStatements = append(r.topLevelStatements, topLevel...)
+			_, _ = w.WriteString(body)
 		}
 	} else {
 		// goldmark still invokes the exit callback after a WalkSkipChildren on

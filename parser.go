@@ -33,15 +33,19 @@ func (p *jsxBlockParser) Priority() int { return 90 }
 func (p *jsxBlockParser) Open(parent ast.Node, reader text.Reader, pc parser.Context) (ast.Node, parser.State) {
 	line, segment := reader.PeekLine()
 
-	if len(line) == 0 || line[0] != '<' {
+	indent := 0
+	for indent < len(line) && indent < 4 && line[indent] == ' ' {
+		indent++
+	}
+	if indent >= len(line) || line[indent] != '<' {
 		return nil, parser.NoChildren
 	}
 
-	if bytes.HasPrefix(line, []byte("<!--")) {
+	if bytes.HasPrefix(line[indent:], []byte("<!--")) {
 		return nil, parser.NoChildren
 	}
 
-	tagName, attrs, selfClosing, tagEndOffset := parseOpeningTag(line[1:])
+	tagName, attrs, selfClosing, tagEndOffset := parseOpeningTag(line[indent+1:])
 	if tagName == "" {
 		return nil, parser.NoChildren
 	}
@@ -49,19 +53,26 @@ func (p *jsxBlockParser) Open(parent ast.Node, reader text.Reader, pc parser.Con
 	node := newJSXBlock(tagName, selfClosing, attrs)
 
 	if selfClosing {
-		reader.Advance(segment.Len())
+		reader.AdvanceLine()
 		return node, parser.NoChildren
 	}
 
-	_ = tagEndOffset
+	closingTag := []byte("</" + tagName + ">")
+	if inner, _, found := bytes.Cut(line[indent+1+tagEndOffset:], closingTag); found {
+		node.RawInner = append([]byte{}, inner...)
+		node.complete = true
+		reader.AdvanceLine()
+		return node, parser.NoChildren
+	}
+
 	reader.Advance(segment.Len())
 
-	pc.Set(contextKeyClosingTag, []byte("</"+tagName+">"))
+	pc.Set(contextKeyClosingTag, closingTag)
 	pc.Set(contextKeyNestDepth, 1)
 	pc.Set(contextKeyTagName, tagName)
 	pc.Set(contextKeyRawInner, []byte{})
 
-	return node, parser.Continue | parser.HasChildren
+	return node, parser.NoChildren
 }
 
 // Continue processes a subsequent line of an open JSX block. It tracks nesting of
@@ -70,6 +81,10 @@ func (p *jsxBlockParser) Open(parent ast.Node, reader text.Reader, pc parser.Con
 func (p *jsxBlockParser) Continue(node ast.Node, reader text.Reader, pc parser.Context) parser.State {
 	jsxNode, ok := node.(*JSXBlock)
 	if !ok {
+		return parser.Close
+	}
+
+	if jsxNode.IsSelfClosing || jsxNode.complete {
 		return parser.Close
 	}
 
@@ -100,7 +115,7 @@ func (p *jsxBlockParser) Continue(node ast.Node, reader text.Reader, pc parser.C
 	pc.Set(contextKeyRawInner, rawInner)
 	reader.Advance(len(line))
 
-	return parser.Continue | parser.HasChildren
+	return parser.Continue | parser.NoChildren
 }
 
 // Close finalises the block when Continue returns parser.Close or at EOF,
