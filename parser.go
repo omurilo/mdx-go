@@ -25,13 +25,18 @@ func (p *jsxBlockParser) Trigger() []byte { return []byte{'<'} }
 // parser, which has priority 70.
 func (p *jsxBlockParser) Priority() int { return 90 }
 
-// Open begins a potential JSX block. It returns the new node together with
-// parser.Continue|parser.HasChildren when the line opens a JSX element, or
-// (nil, parser.NoChildren) to pass control to the next parser. Self-closing tags
-// are completed immediately; otherwise the expected closing tag and nesting
-// state are stored in the parser context for Continue to consume.
+// Open begins a JSX block. It returns the new node with parser.NoChildren when
+// the line opens a JSX element, or (nil, parser.NoChildren) to pass control to
+// the next parser. The element and all of its inner content are consumed in a
+// single pass: self-closing and single-line elements are read from the opening
+// line, while a multi-line element is read by scanning forward to its matching
+// closing tag, tracking nesting of identically named tags. The inner bytes are
+// stored verbatim on the node for the renderer to recompile as a Markdown
+// fragment. Capturing here rather than across Continue calls avoids goldmark's
+// block engine skipping blank lines or re-parsing list and paragraph
+// continuations, which would drop or reorder inner content.
 func (p *jsxBlockParser) Open(parent ast.Node, reader text.Reader, pc parser.Context) (ast.Node, parser.State) {
-	line, segment := reader.PeekLine()
+	line, _ := reader.PeekLine()
 
 	indent := 0
 	for indent < len(line) && indent < 4 && line[indent] == ' ' {
@@ -53,80 +58,69 @@ func (p *jsxBlockParser) Open(parent ast.Node, reader text.Reader, pc parser.Con
 	node := newJSXBlock(tagName, selfClosing, attrs)
 
 	if selfClosing {
-		reader.AdvanceLine()
+		advanceToEOL(reader, line)
 		return node, parser.NoChildren
 	}
 
 	closingTag := []byte("</" + tagName + ">")
+	openingPrefix := []byte("<" + tagName)
+
 	if inner, _, found := bytes.Cut(line[indent+1+tagEndOffset:], closingTag); found {
 		node.RawInner = append([]byte{}, inner...)
-		node.complete = true
-		reader.AdvanceLine()
+		advanceToEOL(reader, line)
 		return node, parser.NoChildren
 	}
 
-	reader.Advance(segment.Len())
+	var raw []byte
+	if after := line[indent+1+tagEndOffset:]; len(bytes.TrimSpace(after)) > 0 {
+		raw = append(raw, after...)
+	}
+	reader.AdvanceLine()
 
-	pc.Set(contextKeyClosingTag, closingTag)
-	pc.Set(contextKeyNestDepth, 1)
-	pc.Set(contextKeyTagName, tagName)
-	pc.Set(contextKeyRawInner, []byte{})
+	depth := 1
+	for {
+		l, _ := reader.PeekLine()
+		if l == nil {
+			break
+		}
+		opens := bytes.Count(l, openingPrefix)
+		closes := bytes.Count(l, closingTag)
+		if closes > 0 && depth+opens-closes <= 0 {
+			before, _, _ := bytes.Cut(l, closingTag)
+			raw = append(raw, before...)
+			advanceToEOL(reader, l)
+			break
+		}
+		depth += opens - closes
+		raw = append(raw, l...)
+		reader.AdvanceLine()
+	}
 
+	node.RawInner = raw
 	return node, parser.NoChildren
 }
 
-// Continue processes a subsequent line of an open JSX block. It tracks nesting of
-// identically named tags, accumulates inner content verbatim, and returns
-// parser.Close once the matching closing tag is reached at depth zero.
+// advanceToEOL moves the reader to the end of the given line without consuming
+// the trailing newline, mirroring how goldmark's own single-line block parsers
+// leave the line break for the block engine to process. Advancing past the
+// newline instead desynchronises the engine and drops the following line.
+func advanceToEOL(reader text.Reader, line []byte) {
+	n := len(line)
+	if n > 0 && line[n-1] == '\n' {
+		n--
+	}
+	reader.Advance(n)
+}
+
+// Continue closes the block immediately because Open consumes the element and
+// all of its inner content in a single pass; nothing remains to accumulate
+// across lines.
 func (p *jsxBlockParser) Continue(node ast.Node, reader text.Reader, pc parser.Context) parser.State {
-	jsxNode, ok := node.(*JSXBlock)
-	if !ok {
-		return parser.Close
-	}
-
-	if jsxNode.IsSelfClosing || jsxNode.complete {
-		return parser.Close
-	}
-
-	closingTag, _ := pc.Get(contextKeyClosingTag).([]byte)
-	tagName, _ := pc.Get(contextKeyTagName).(string)
-	depthVal, _ := pc.Get(contextKeyNestDepth).(int)
-	rawInner, _ := pc.Get(contextKeyRawInner).([]byte)
-
-	line, _ := reader.PeekLine()
-
-	openingPrefix := []byte("<" + tagName)
-	if bytes.Contains(line, openingPrefix) {
-		depthVal++
-		pc.Set(contextKeyNestDepth, depthVal)
-	}
-
-	if bytes.Contains(line, closingTag) {
-		depthVal--
-		pc.Set(contextKeyNestDepth, depthVal)
-		if depthVal <= 0 {
-			jsxNode.RawInner = rawInner
-			reader.Advance(len(line))
-			return parser.Close
-		}
-	}
-
-	rawInner = append(rawInner, line...)
-	pc.Set(contextKeyRawInner, rawInner)
-	reader.Advance(len(line))
-
-	return parser.Continue | parser.NoChildren
+	return parser.Close
 }
 
-// Close finalises the block when Continue returns parser.Close or at EOF,
-// ensuring any accumulated inner content is stored on the node.
-func (p *jsxBlockParser) Close(node ast.Node, reader text.Reader, pc parser.Context) {
-	if jsxNode, ok := node.(*JSXBlock); ok {
-		if ri, ok2 := pc.Get(contextKeyRawInner).([]byte); ok2 && jsxNode.RawInner == nil {
-			jsxNode.RawInner = ri
-		}
-	}
-}
+// Close is a no-op: the node is fully populated during Open.
+func (p *jsxBlockParser) Close(node ast.Node, reader text.Reader, pc parser.Context) {}
 
 // CanInterruptParagraph reports that a JSX block may begin within a paragraph's
 // text flow.
@@ -135,16 +129,6 @@ func (p *jsxBlockParser) CanInterruptParagraph() bool { return true }
 // CanAcceptIndentedLine reports that JSX blocks must start at column zero and
 // therefore cannot accept an indented line.
 func (p *jsxBlockParser) CanAcceptIndentedLine() bool { return false }
-
-// Context keys used to carry JSX block state across Open, Continue and Close.
-// goldmark requires each key to be a unique parser.ContextKey allocated via
-// parser.NewContextKey.
-var (
-	contextKeyClosingTag = parser.NewContextKey()
-	contextKeyNestDepth  = parser.NewContextKey()
-	contextKeyTagName    = parser.NewContextKey()
-	contextKeyRawInner   = parser.NewContextKey()
-)
 
 // parseOpeningTag parses the bytes following the initial '<' of an opening tag.
 // It returns the element or component name (empty on failure), the parsed

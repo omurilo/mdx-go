@@ -231,11 +231,3 @@ func bracketDelta(s string) int {
 
 // Version returns the library version string.
 func Version() string { return "0.1.0" }
-
-func DebugFragmentRaw(src []byte) string {
-	ext := NewMDXExtension()
-	ext.Renderer.fragment = true
-	var buf bytes.Buffer
-	_ = newMarkdown(ext).Convert(src, &buf)
-	return buf.String()
-}

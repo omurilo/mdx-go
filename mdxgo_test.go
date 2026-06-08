@@ -379,3 +379,138 @@ func main() { fmt.Println("hello") }
 		}
 	}
 }
+
+// mustCompile compiles src and fails the test on any goldmark or esbuild error.
+// A clean return already proves esbuild.Transform produced zero errors, since
+// Compile surfaces them as a Go error.
+func mustCompile(t *testing.T, src string) string {
+	t.Helper()
+	out, err := Compile([]byte(src))
+	if err != nil {
+		t.Fatalf("Compile failed:\n%v\n\nsource:\n%s", err, src)
+	}
+	return out
+}
+
+func TestCompile_ListWithLink_InsideJSXBlock(t *testing.T) {
+	src := `<div className="box">
+
+You can use **bold** and:
+
+- Lists
+- [Links](/)
+- Code blocks
+
+</div>
+`
+	out := mustCompile(t, src)
+	for _, want := range []string{
+		`React.createElement(_c.strong, null, "bold")`,
+		`React.createElement(_c.a, { href: "/" }, "Links")`,
+		`"Lists"`,
+		`"Code blocks"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected output to contain %q, got:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, `"- [Links](/)"`) || strings.Contains(out, `- [Links]`) {
+		t.Errorf("link list item leaked as raw text, got:\n%s", out)
+	}
+}
+
+func TestCompile_LinkFirstListItem_InsideJSXBlock(t *testing.T) {
+	src := "<div>\n\n- [Home](/) first\n- second\n\n</div>\n"
+	out := mustCompile(t, src)
+	if !strings.Contains(out, `React.createElement(_c.a, { href: "/" }, "Home")`) {
+		t.Errorf("expected link in first list item, got:\n%s", out)
+	}
+}
+
+func TestCompile_TwoLinksAndBold_SameItem_InsideJSXBlock(t *testing.T) {
+	src := "<div>\n\n- See [one](/a) and [two](/b) with **bold**\n\n</div>\n"
+	out := mustCompile(t, src)
+	for _, want := range []string{
+		`React.createElement(_c.a, { href: "/a" }, "one")`,
+		`React.createElement(_c.a, { href: "/b" }, "two")`,
+		`React.createElement(_c.strong, null, "bold")`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected output to contain %q, got:\n%s", want, out)
+		}
+	}
+}
+
+func TestCompile_OrderedListWithLink_InsideJSXBlock(t *testing.T) {
+	src := "<div>\n\n1. [first](/1)\n2. second\n\n</div>\n"
+	out := mustCompile(t, src)
+	if !strings.Contains(out, `React.createElement(_c.ol`) {
+		t.Errorf("expected ordered list, got:\n%s", out)
+	}
+	if !strings.Contains(out, `React.createElement(_c.a, { href: "/1" }, "first")`) {
+		t.Errorf("expected link in ordered list, got:\n%s", out)
+	}
+}
+
+func TestCompile_LinkInParagraph_InsideJSXBlock(t *testing.T) {
+	src := "<div>\n\nSee [the docs](/docs) for more.\n\n</div>\n"
+	out := mustCompile(t, src)
+	if !strings.Contains(out, `React.createElement(_c.a, { href: "/docs" }, "the docs")`) {
+		t.Errorf("expected link in paragraph, got:\n%s", out)
+	}
+}
+
+func TestCompile_ListWithLink_OutsideJSXBlock(t *testing.T) {
+	src := "- [Links](/)\n- plain\n"
+	out := mustCompile(t, src)
+	if !strings.Contains(out, `React.createElement(_c.a, { href: "/" }, "Links")`) {
+		t.Errorf("expected link in top-level list, got:\n%s", out)
+	}
+}
+
+func TestCompile_CodeSpanWithBraces_InsideJSXBlock(t *testing.T) {
+	src := "<details>\n\n- jwt: `{ kind: \"jwt\", keyNames?: string[] }`\n\n</details>\n"
+	out := mustCompile(t, src)
+	if !strings.Contains(out, "_c.code") {
+		t.Errorf("expected code span element, got:\n%s", out)
+	}
+	if !strings.Contains(out, `keyNames?: string[]`) {
+		t.Errorf("expected code span content preserved as a string, got:\n%s", out)
+	}
+}
+
+func TestCompile_SingleLineTag_PreservesFollowingContent(t *testing.T) {
+	src := "<details>\n  <summary>Title</summary>\n  ### Heading\n\n- item\n</details>\n"
+	out := mustCompile(t, src)
+	for _, want := range []string{"summary", "Title", "_c.h3", "Heading", "item"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected output to contain %q, got:\n%s", want, out)
+		}
+	}
+}
+
+func TestCompile_SelfClosingTag_PreservesFollowingContent(t *testing.T) {
+	src := "<Hr />\n\nfollowing paragraph\n"
+	out := mustCompile(t, src)
+	if !strings.Contains(out, "following paragraph") {
+		t.Errorf("content after self-closing tag was lost, got:\n%s", out)
+	}
+}
+
+func TestCompile_ContentAfterJSXBlock(t *testing.T) {
+	src := "<div>\n\ninside\n\n</div>\n\nafter the div\n"
+	out := mustCompile(t, src)
+	if !strings.Contains(out, "after the div") {
+		t.Errorf("content after JSX block was lost, got:\n%s", out)
+	}
+}
+
+func TestCompile_NestedSameTag(t *testing.T) {
+	src := "<div>\n\nouter\n\n<div>\n\ninner\n\n</div>\n\nback\n\n</div>\n"
+	out := mustCompile(t, src)
+	for _, want := range []string{"outer", "inner", "back"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected nested content %q, got:\n%s", want, out)
+		}
+	}
+}
