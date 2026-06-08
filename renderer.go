@@ -195,15 +195,13 @@ func (r *jsxRenderer) renderFencedCode(w util.BufWriter, source []byte, node ast
 		line := lines.At(i)
 		sb.Write(source[line.Start:line.Stop])
 	}
-	code := escapeJSXText(sb.String())
+	code := escapeTemplateLiteral(strings.TrimRight(sb.String(), "\n"))
 	if lang != "" {
 		_, _ = fmt.Fprintf(w, "      <_c.pre><_c.code className=%q>{`%s`}</_c.code></_c.pre>\n",
-			"language-"+lang, strings.TrimRight(sb.String(), "\n"))
+			"language-"+lang, code)
 	} else {
-		_, _ = fmt.Fprintf(w, "      <_c.pre><_c.code>{`%s`}</_c.code></_c.pre>\n",
-			strings.TrimRight(sb.String(), "\n"))
+		_, _ = fmt.Fprintf(w, "      <_c.pre><_c.code>{`%s`}</_c.code></_c.pre>\n", code)
 	}
-	_ = code
 	return ast.WalkSkipChildren, nil
 }
 
@@ -218,8 +216,8 @@ func (r *jsxRenderer) renderCodeBlock(w util.BufWriter, source []byte, node ast.
 		line := lines.At(i)
 		sb.Write(source[line.Start:line.Stop])
 	}
-	_, _ = fmt.Fprintf(w, "      <_c.pre><_c.code>{`%s`}</_c.code></_c.pre>\n",
-		strings.TrimRight(sb.String(), "\n"))
+	code := escapeTemplateLiteral(strings.TrimRight(sb.String(), "\n"))
+	_, _ = fmt.Fprintf(w, "      <_c.pre><_c.code>{`%s`}</_c.code></_c.pre>\n", code)
 	return ast.WalkSkipChildren, nil
 }
 
@@ -420,6 +418,20 @@ func escapeJSXText(s string) string {
 	s = strings.ReplaceAll(s, ">", "&gt;")
 	s = strings.ReplaceAll(s, "{", "&#123;")
 	s = strings.ReplaceAll(s, "}", "&#125;")
+	return s
+}
+
+// escapeTemplateLiteral escapes the characters that are special inside a
+// JavaScript template literal so that arbitrary code-block text can be embedded
+// verbatim within an enclosing {`...`} expression without prematurely closing
+// the literal or triggering interpolation. The order matters: backslashes are
+// escaped first so the backslashes introduced for backticks and ${ are not
+// themselves doubled. JSX/JS decodes these escapes back to the original bytes
+// at render time, so the rendered text round-trips to the source byte-for-byte.
+func escapeTemplateLiteral(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, "`", "\\`")
+	s = strings.ReplaceAll(s, "${", "\\${")
 	return s
 }
 

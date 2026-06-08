@@ -3,6 +3,8 @@ package mdxgo
 import (
 	"strings"
 	"testing"
+
+	esbuild "github.com/evanw/esbuild/pkg/api"
 )
 
 func TestParseAttributes_Empty(t *testing.T) {
@@ -230,6 +232,129 @@ Paragraph here.`
 		if strings.Contains(s, "Heading") {
 			t.Errorf("heading leaked into top-level statements: %v", stmts)
 		}
+	}
+}
+
+// fence wraps body in a fenced code block with the given info string.
+func fence(lang, body string) string {
+	return "```" + lang + "\n" + body + "\n```"
+}
+
+// decodeTemplateLiteral reverses escapeTemplateLiteral the way a JavaScript
+// engine evaluates a template literal: a backslash escapes the character that
+// follows it, which the literal emits verbatim. Because escapeTemplateLiteral
+// only ever introduces backslashes in escape pairs (`\\`, "\\`", "\\${"), this
+// faithfully recovers the original source bytes.
+func decodeTemplateLiteral(s string) string {
+	var sb strings.Builder
+	runes := []rune(s)
+	for i := 0; i < len(runes); i++ {
+		if runes[i] == '\\' && i+1 < len(runes) {
+			sb.WriteRune(runes[i+1])
+			i++
+			continue
+		}
+		sb.WriteRune(runes[i])
+	}
+	return sb.String()
+}
+
+func TestEscapeTemplateLiteral_RoundTrip(t *testing.T) {
+	cases := []string{
+		"plain code",
+		"return `Hello, ${name}!`;",
+		`const re = /\d+\.\d+/;`,
+		`a backslash: \ and a backtick: ` + "`",
+		`literal ${ without closing`,
+		"multi\nline\n\twith tabs and ${x} `quotes`",
+		`mixed \${escaped} and ${live}`,
+	}
+	for _, original := range cases {
+		escaped := escapeTemplateLiteral(original)
+		got := decodeTemplateLiteral(escaped)
+		if got != original {
+			t.Errorf("round-trip mismatch:\n original: %q\n escaped:  %q\n decoded:  %q", original, escaped, got)
+		}
+	}
+}
+
+func TestEscapeTemplateLiteral_Order(t *testing.T) {
+	// A lone backslash must be doubled first, otherwise the backslashes added
+	// for backticks/${ would themselves be doubled. "\`" must become "\\`".
+	if got := escapeTemplateLiteral("`"); got != "\\`" {
+		t.Errorf("backtick: expected %q, got %q", "\\`", got)
+	}
+	if got := escapeTemplateLiteral(`\`); got != `\\` {
+		t.Errorf("backslash: expected %q, got %q", `\\`, got)
+	}
+	if got := escapeTemplateLiteral("${"); got != "\\${" {
+		t.Errorf("interpolation: expected %q, got %q", "\\${", got)
+	}
+	// A backslash already followed by a backtick must not collapse into a
+	// single escaped backtick: `\`+"`" -> `\\\`+"`" -> "\\\\`".
+	if got := escapeTemplateLiteral("\\`"); got != "\\\\\\`" {
+		t.Errorf("backslash+backtick: expected %q, got %q", "\\\\\\`", got)
+	}
+}
+
+func TestCompile_FencedCode_BacktickAndInterpolation(t *testing.T) {
+	body := "export function greet(name: string): string {\n  return `Hello, ${name}!`;\n}"
+	src := fence("ts", body)
+	out, err := Compile([]byte(src))
+	if err != nil {
+		t.Fatalf("Compile failed on code block with backticks/${}: %v", err)
+	}
+	if !strings.Contains(out, "language-ts") {
+		t.Errorf("expected language-ts class in output, got:\n%s", out)
+	}
+}
+
+func TestCompile_FencedCode_Backslashes(t *testing.T) {
+	body := `const re = /\d+\.\d+/;`
+	src := fence("js", body)
+	if _, err := Compile([]byte(src)); err != nil {
+		t.Fatalf("Compile failed on code block with backslashes: %v", err)
+	}
+}
+
+func TestCompile_FencedCode_UnclosedInterpolation(t *testing.T) {
+	body := "the literal ${ should not interpolate"
+	src := fence("", body)
+	if _, err := Compile([]byte(src)); err != nil {
+		t.Fatalf("Compile failed on code block with unclosed ${: %v", err)
+	}
+}
+
+func TestCompile_IndentedCodeBlock_Specials(t *testing.T) {
+	// Four-space indent produces an ast.CodeBlock rather than a fenced one.
+	src := "    return `x ${y}` + '\\\\';"
+	if _, err := Compile([]byte(src)); err != nil {
+		t.Fatalf("Compile failed on indented code block with specials: %v", err)
+	}
+}
+
+// TestCompile_FencedCode_EsbuildTransformSmoke exercises the exact path that
+// failed before the fix: Compile already runs esbuild.Transform internally, so
+// a clean Compile proves the JSX template literal is well-formed. We then run
+// esbuild.Transform once more over a hand-built intermediate to assert the
+// escaped form yields zero transform errors under Loader=JSX.
+func TestCompile_FencedCode_EsbuildTransformSmoke(t *testing.T) {
+	body := "export function greet(name: string): string {\n  return `Hello, ${name}!`;\n}"
+	src := fence("ts", body)
+	if _, err := Compile([]byte(src)); err != nil {
+		t.Fatalf("Compile (which runs esbuild.Transform) failed: %v", err)
+	}
+
+	escaped := escapeTemplateLiteral(body)
+	jsx := "const x = (<pre><code className=\"language-ts\">{`" + escaped + "`}</code></pre>);"
+	res := esbuild.Transform(jsx, esbuild.TransformOptions{
+		Loader:      esbuild.LoaderJSX,
+		JSXFactory:  "React.createElement",
+		JSXFragment: "React.Fragment",
+	})
+	if len(res.Errors) != 0 {
+		t.Fatalf("esbuild.Transform reported %d errors on escaped code block: %v",
+			len(res.Errors), res.Errors)
 	}
 }
 
